@@ -59,6 +59,7 @@ class Siren(torch.nn.Module):
             self.register_parameter('biases-{}'.format(index), bias)
 
     def forward(self, input:Tensor)->Tuple[Tensor, Optional[List[Tensor]]]:
+        # TEST: Would not multipling by omega_0 during initialization help performance or multiplying by omega_0 for more layers?
         input:Tensor = input.clone().detach().requires_grad_(True)
         if self.intermediate_output:
             intermediate_output:List[Tensor] = []
@@ -91,7 +92,7 @@ class Siren(torch.nn.Module):
         
         for index, ((m_weight, m_bias), (u_weight, u_bias)) in enumerate(zip(self.layer_parameters, updated_parameters)):
             if (m_weight.shape != u_weight.shape) or (m_bias.shape != u_bias.shape):
-                raise ValueError(("Shapes of weight or bias at index {} of input weights and biases does not match stored weights and biases shapes"
+                raise ValueError(("Shapes of weight or bias at index {} of input weights and biases does not match stored weights and biases shapes\n"
                                   "Shape of input weight and bias are {}, {} respectively\n"
                                   "Shape of stored weight and bias are {}, {} respectively\n"
                 ).format(index, u_weight.shape, u_bias.shape, m_weight.shape, m_bias.shape))
@@ -103,15 +104,15 @@ class Recurrent_Siren(torch.nn.Module):
     intermediate_output:bool
     linear_output:bool
     segment_parameters:List[List[Tuple[Parameter, Parameter]]]
-    outgoing_segment_jumps:List[List[int]]
-    incoming_segment_jumps:List[List[int]]
+    outgoing_segment_jumps:List[Tuple[int, List[int]]]
+    incoming_segment_jumps:List[Tuple[int, List[int]]]
 
     # TODO: allow for sending in either only outgoing_segment_jumps or incoming_segment_jumps and deduce the other as needed
 
     # TODO: Fix init and make the forward pass so that it actually properly represents an unrolled recurrent siren with skip and feedback connections
 
-    def __init__(self, in_parameters:int, out_parameters:int, segment_descriptions:Optional[List[List[int]]], \
-                parameters:Optional[List[List[Tuple[Parameter, Parameter]]]], outgoing_segment_jumps:List[List[int]], \
+    def __init__(self, in_parameters:int, out_parameters:int, segment_descriptions:Optional[List[List[int]]], parameters:Optional[List[List[Tuple[Parameter, Parameter]]]], \
+                incoming_segment_jumps:Optional[List[Tuple[int, List[int]]]], outgoing_segment_jumps:Optional[List[Tuple[int, List[int]]]], \
                 intermediate_output:bool, linear_output:bool):
         '''
         # TODO description
@@ -136,6 +137,8 @@ class Recurrent_Siren(torch.nn.Module):
          - Note: All incoming segment connections to a segment have to be the same size but they don't have to be the same size as the segment
          - Note: Forward targets must be unique for a segment and in ascending order
 
+        - incoming_segment_jumps
+
         - intermediate_output:
 
         - linear_output:
@@ -146,47 +149,136 @@ class Recurrent_Siren(torch.nn.Module):
         if (segment_descriptions is None) == (parameters is None):
             raise ValueError("(`segement_description` is None) xor (`parameters` is None) must return False")
 
+        # xor check for None
+        if (incoming_segment_jumps is None) == (outgoing_segment_jumps is None):
+            raise ValueError("(incoming_segment_jumps is None) xor (outgoing_segment_jumps) must return False")
+
+        # TODO Rewrite this description
         # check for any forwards to the initial segment
         # check if the last segment has any outbound jumps
         # check if that outbound jumps are unique for a segment and in ascending order
         # check if all segments beyond the first and last have both incoming and outgoing connections
         # check if the boundries between segments match up in size
         # Create list that keeps track of incoming jumps to current segment indexed by outer index
-        incoming_segment_jumps:List[List[int]] = []
-        num_segments:int = len(outgoing_segment_jumps)
-        for index, destinations in enumerate(outgoing_segment_jumps):
-            if (index == (num_segments-1)) and (destinations != []):
-                raise ValueError("last segment has nonempty forward list")
-            elif (index != (num_segments-1)) and (destinations == []):
-                raise ValueError("destinations at index {} is an empty list".format(index))
-            incoming_segment_jumps.append([])
-        for source_index, destinations in enumerate(outgoing_segment_jumps[:-1]):
-            if 0 in destinations:
-                raise ValueError("destinations in segment index {} forwards to first segment.\ndestinations: {}".format(source_index, destinations))
-            last_destination:int = -1
-            for destination in destinations:
-                if destination <= last_destination:
-                    raise ValueError("destinations in segment index {} not strictly increasing or >= 0.\ndestinations: {}".format(source_index, destinations))
-                incoming_segment_jumps[destination].append(source_index)
-                last_destination = destination
-        for index, sources in enumerate(incoming_segment_jumps[1:]):
-            if sources == []:
-                raise ValueError("No sources for segment at index {}".format(index))
-            source_size:int = 0
-            other_sorce_size:int = 0
+        if incoming_segment_jumps is None:
+            incoming_segment_jumps = []
+            num_segment_jumps:int = len(outgoing_segment_jumps)
+            num_segments:int = 0
             if parameters is None:
-                source_size = segment_descriptions[sources[0]][-1]
+                num_segments = len(segment_descriptions)
             else:
-                source_size = parameters[sources[0]][-1][1].shape[0]
-            for other_source in sources[1:]:
+                num_segments = len(parameters)
+
+            for current_jump_index, (current_segment_index, destinations) in enumerate(outgoing_segment_jumps):
+                if current_segment_index == num_segments-1:
+                    if current_jump_index != num_segment_jumps-1:
+                        raise ValueError("Outgoing segment jump index {} corresponds to last segment without being last outgoing segment jump index".format(current_jump_index))
+                    if destinations != []:
+                        raise ValueError("Last outgoing segment jump's destinations is not an empty list")
+                elif destinations == []:
+                    raise ValueError("Outgoing segment jump index {} has an empty destinations list without being last outgoing segment jump index".format(current_jump_index))
+                incoming_segment_jumps.append((current_segment_index, []))
+
+            for current_jump_index, (_, destinations) in enumerate(outgoing_segment_jumps[:-1]):
+                last_destination:int = current_jump_index
+                for destination in destinations:
+                    if destination <= last_destination:
+                        raise ValueError("Outgoing segment jump index {0} must have strictly increasing destination jumps indices that are greater than {0}\ndestinations: {1}".format(
+                            current_jump_index, destinations
+                        ))
+                    if destination > num_segment_jumps-1:
+                        raise ValueError("Outgoing segment jump index {0} has destination greater than last segment jump index: {1}\ndestinations: {2}".format(
+                            current_jump_index, num_segment_jumps-1, destinations
+                        ))
+
+                    incoming_segment_jumps[destination][1].append(current_jump_index)
+                    last_destination = destination
+            
+            for current_jump_index, (current_segment_index, sources) in enumerate(incoming_segment_jumps):
+                if current_segment_index == 0:
+                    if current_jump_index != 0:
+                        raise ValueError("Incoming segment jump index {} corresponds to first segment without being first incoming segment jump index".format(current_jump_index))
+                    if sources != []:
+                        raise ValueError("First incoming segment jump's sources is not an empty list")
+                    continue
+                if sources == []:
+                    raise ValueError("Incoming segment jump index {} has an empty sources list without being first incoming segment jump index".format(current_jump_index))
+                source_size:int = 0
+                other_source_size:int = 0
                 if parameters is None:
-                    other_sorce_size = segment_descriptions[other_source][-1]
+                    source_size = segment_descriptions[incoming_segment_jumps[sources[0]][0]][-1]
                 else:
-                    other_sorce_size = parameters[other_source][-1].shape[0]
-                if source_size != other_sorce_size:
-                    raise ValueError("Incoming segment {} of size {} not equal to size of different incoming segment {} of size {} forwarding to segment index {}".format(
-                        other_source, other_sorce_size, sources[0], source_size, index
-                    ))
+                    source_size = parameters[incoming_segment_jumps[sources[0]][0]][-1][1].shape[0]
+                for other_source in sources[1:]:
+                    if parameters is None:
+                        other_source_size = segment_descriptions[incoming_segment_jumps[other_source][0]][-1]
+                    else:
+                        other_source_size = parameters[incoming_segment_jumps[other_source][0]][-1][1].shape[0]
+                    if source_size != other_source_size:
+                        raise ValueError(("Incoming segment jump index {} has sources of different outgoing sizes\nsources: {}\n"
+                            "Size of segment output corresponding to source jump index {} is {}\n"
+                            "Size of segment output corresponding to source jump index {} is {}"
+                        ).format(current_jump_index, sources, sources[0], source_size, other_source, other_source_size))
+        else:
+            outgoing_segment_jumps = []
+            num_segment_jumps:int = len(incoming_segment_jumps)
+            num_segments:int = 0
+            if parameters is None:
+                num_segments = len(segment_descriptions)
+            else:
+                num_segments = len(parameters)
+
+            for current_jump_index, (current_segment_index, sources) in enumerate(incoming_segment_jumps):
+                if current_segment_index == 0:
+                    if current_jump_index != 0:
+                        raise ValueError("Incoming segment jump index {} corresponds to first segment without being first incoming segment jump index".format(current_jump_index))
+                    if sources != []:
+                        raise ValueError("First incoming segment jump's sources is not an empty list")
+                elif sources == []:
+                    raise ValueError("Incoming segment jump index {} has an empty sources list without being first incoming segment jump index".format(current_jump_index))
+                outgoing_segment_jumps.append((current_segment_index, []))
+
+            for current_jump_index, (_, sources) in enumerate(incoming_segment_jumps[1:]):
+                last_source:int = current_jump_index
+                for source in sources:
+                    if source >= last_source:
+                        raise ValueError("Incoming segment jump index {0} must have strictly increasing source jumps indices that are less than {0}\nsources: {1}".format(
+                            current_jump_index, sources
+                        ))
+                    if source < 0:
+                        raise ValueError("Incoming segment jump index {0} has source less than first segment jump index: {1}\nsources: {2}".format(
+                            current_jump_index, 0, sources
+                        ))
+
+                    outgoing_segment_jumps[source][1].append(current_jump_index)
+                    last_source = source
+            
+            for current_jump_index, (current_segment_index, destinations) in enumerate(outgoing_segment_jumps):
+                if current_segment_index == num_segment_jumps-1:
+                    if current_jump_index != num_segments-1:
+                        raise ValueError("Outgoing segment jump index {} corresponds to last segment without being last outgoing segment jump index".format(current_jump_index))
+                    if destinations != []:
+                        raise ValueError("Last outgoing segment jump's destinations is not an empty list")
+                    continue
+                if destinations == []:
+                    raise ValueError("Outgoing segment jump index {} has an empty destination list without being last outgoing segment jump index".format(current_jump_index))
+                destination_size:int = 0
+                other_destination_size:int = 0
+                if parameters is None:
+                    destination_size = segment_descriptions[incoming_segment_jumps[destinations[0]][0]][0]
+                else:
+                    destination_size = parameters[incoming_segment_jumps[destinations[0]][0]][0][1].shape[0]
+                for other_destination in destinations[1:]:
+                    if parameters is None:
+                        other_destination_size = segment_descriptions[incoming_segment_jumps[other_source][0]][0]
+                    else:
+                        other_destination_size = parameters[incoming_segment_jumps[other_source][0]][0][1].shape[0]
+                    if destination_size != other_destination_size:
+                        raise ValueError(("Outgoing segment jump index {} has destinations of different incoming sizes\ndestinations: {}\n"
+                            "Size of segment output corresponding to destination jump index {} is {}\n"
+                            "Size of segment output corresponding to destination jump index {} is {}"
+                        ).format(current_jump_index, destination, destinations[0], destination_size, other_destination, other_destination_size))
+
         
         omega_0:Final[float] = 30.
         self.intermediate_output = intermediate_output
