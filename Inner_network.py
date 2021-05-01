@@ -1,4 +1,5 @@
 import torch
+import torch.nn as nn
 from torch.nn import Parameter
 import torch.nn.functional as F
 from torch import Tensor
@@ -10,8 +11,12 @@ from inner_config import *
 from modified_siren import Siren
 #from optimizer import Perturb_Parameters
 
+from temporary_siren import SineLayer, JumpNetwork
+
 from typing import Tuple, List, Optional, Dict
 from typing_extensions import Final
+
+from math import tau, sqrt
 
 from PIL.ImageShow import show
 
@@ -151,28 +156,118 @@ def train_image(training_parameters:Dict[str, Optional[str]], model:torch.nn.Mod
             print("Loss[image]{unweighted: %f, weighted: %f}" % (iteration_image_loss, iteration_image_loss * alpha['output']))
             print("Loss[hidden_linears]{unweighted: %f, weighted: %f}" % (iteration_hidden_linear_loss, iteration_hidden_linear_loss * alpha['hidden_linear']))
             print("Loss[total]{unweighted: %f, weighted:%f}" % (iteration_loss_unweighted, iteration_loss_weighted))
-            print("Per pixel per channel image loss: %2.8E" % (image_size))
+            print("Per pixel per channel image loss: %2.8E" % (iteration_image_loss / image_size))
 
         # Save model if requested and is save iteration
         if (training_parameters['steps_between_save'] is not None) and (iteration_step % training_parameters['steps_between_save'] == 0):
-            model.save('.model_saves/Siren/%2.8E_%d.pt' % (image_size, iteration_step))
+            #model.save('.model_saves/Siren/%2.8E_%d.pt' % (iteration_image_loss / image_size, iteration_step))
+            torch.save(model, '.model_saves/SirenLarge14Layer/%2.8E_%d.pt' % (iteration_image_loss / image_size, iteration_step))
 
     return model, running_loss_unweighted, running_loss_weighted
 
+
+# Use wandb tools to do hyperparameter search
 if __name__ == '__main__':
-    model = Siren(*config_model)
-    model = torch.jit.script(model)
+    #model = Siren(*config_model)
+    #model = torch.jit.script(model)
+
+    # test different scaling constants
+    #fourier = torch.normal(torch.zeros((2, 256)), 1.)# * 10.
+    #fourier = fourier.cuda()
+    fourier = None
+
+    '''
+    section0 = torch.nn.Sequential(
+        SineLayer(64, 64, 30./64, 1.),
+        #SineLayer(2, 64, 30./2, 1.),
+        SineLayer(64, 64, 30./64, 1.),
+        SineLayer(64, 64, 30./64, 1.),
+    )
+    section1 = torch.nn.Sequential(
+        SineLayer(64, 64, 30./64, 1.),
+        SineLayer(64, 64, 30./64, 1.),
+        SineLayer(64, 64, 30./64, 1.),
+        SineLayer(64, 64, 30./64, 1.),
+    )
+    section2 = torch.nn.Sequential(
+        SineLayer(64, 64, 30./64, 1.),
+        SineLayer(64, 64, 30./64, 1.),
+        SineLayer(64, 64, 30./64, 1.),
+    )
+    section3 = torch.nn.Sequential(
+        SineLayer(64, 64, 30./64, 1.),
+        SineLayer(64, 64, 30./64, 1.),
+        SineLayer(64, 64, 30./64, 1.),
+    )
+    section4 = torch.nn.Sequential(
+        SineLayer(64, 3, 30./64, 1.),
+    )
+    '''
+    sectionfourier = torch.nn.Sequential(
+        #nn.Linear(512, 512, True), nn.ReLU(), # 1
+        #nn.Linear(512, 256, True), nn.ReLU(), # 2
+        #nn.Linear(256, 256, True), nn.ReLU(), # 3
+        #nn.Linear(256, 256, True), nn.ReLU(), # 4
+        #nn.Linear(256, 128, True), nn.ReLU(), # 5
+        #nn.Linear(128, 128, True), nn.ReLU(), # 6
+        #nn.Linear(128, 128, True), nn.ReLU(), # 7
+        #nn.Linear(128, 128, True), nn.ReLU(), # 8
+        #nn.Linear(128, 64, True), nn.ReLU(), # 9
+        #nn.Linear(64, 64, True), nn.ReLU(), # 10
+        #nn.Linear(64, 64, True), nn.ReLU(), # 11
+        #nn.Linear(64, 64, True), nn.ReLU(), # 12
+        #nn.Linear(64, 64, True), nn.ReLU(), # 13
+        #nn.Linear(64, 3, True), #nn.Sigmoid(), # 14
+
+        SineLayer(2, 512, 30./2, sqrt(1./2)),            # 1
+        SineLayer(512, 512, sqrt(6./512), sqrt(1./512)), # 2
+        SineLayer(512, 256, sqrt(6./512), sqrt(1./512)), # 3
+        SineLayer(256, 256, sqrt(6./256), sqrt(1./256)), # 4
+        SineLayer(256, 256, sqrt(6./256), sqrt(1./256)), # 5
+        SineLayer(256, 128, sqrt(6./256), sqrt(1./256)), # 6
+        SineLayer(128, 128, sqrt(6./128), sqrt(1./128)), # 7
+        SineLayer(128, 128, sqrt(6./128), sqrt(1./128)), # 8
+        SineLayer(128, 128, sqrt(6./128), sqrt(1./128)), # 9
+        SineLayer(128, 64, sqrt(6./128), sqrt(1./128)),  # 10
+        SineLayer(64, 64, sqrt(6./64), sqrt(1./64)),     # 11
+        SineLayer(64, 64, sqrt(6./64), sqrt(1./64)),     # 12
+        SineLayer(64, 64, sqrt(6./64), sqrt(1./64)),     # 13
+        SineLayer(64, 3, sqrt(6./64), sqrt(1./64)),      # 14
+        
+        #SineLayer(2,  64,       30./2, sqrt(1./2) ), # 1
+        #SineLayer(64, 64, sqrt(6./64), sqrt(1./64)), # 2
+        #SineLayer(64, 64, sqrt(6./64), sqrt(1./64)), # 3
+        #SineLayer(64, 64, sqrt(6./64), sqrt(1./64)), # 4
+        #SineLayer(64, 64, sqrt(6./64), sqrt(1./64)), # 5
+        #SineLayer(64, 64, sqrt(6./64), sqrt(1./64)), # 6
+        #SineLayer(64, 64, sqrt(6./64), sqrt(1./64)), # 7
+        #SineLayer(64, 64, sqrt(6./64), sqrt(1./64)), # 8
+        #SineLayer(64, 64, sqrt(6./64), sqrt(1./64)), # 9
+        #SineLayer(64, 64, sqrt(6./64), sqrt(1./64)), # 10
+        #SineLayer(64, 64, sqrt(6./64), sqrt(1./64)), # 11
+        #SineLayer(64, 64, sqrt(6./64), sqrt(1./64)), # 12
+        #SineLayer(64, 64, sqrt(6./64), sqrt(1./64)), # 13
+        #SineLayer(64, 3,  sqrt(6./64), sqrt(1./64))  # 14
+        
+    )
+
+    section_list:List[torch.nn.Module] = [sectionfourier]#[section0, section1, section2, section3, section4]
+
+    model = JumpNetwork(section_list, fourier)
+
+
     if config_optimizer[0] == 'Adam':
         optimizer = Adam(model.parameters(), **config_optimizer[1])
     elif config_optimizer[0] == 'SGD':
         optimizer = SGD(model.parameters(), **config_optimizer[1])
     else:
-        raise ValueError("Optimizer[0] not found. Got %" % (config_optimizer[0]))
+        raise ValueError("Optimizer[0] not found. Got %s" % (config_optimizer[0]))
 
     grid = get_mgrid(config_image[1])
     image = get_image_tensor(config_image[0], config_image[1])
 
     model, _, _ = train_image(config_training_parameters, model, grid, image, optimizer, config_alpha)
+    #model = torch.jit.load('.model_saves/Siren/1.48716288E-10_100000.pt')
 
     with torch.no_grad():
         grid = grid.cuda()

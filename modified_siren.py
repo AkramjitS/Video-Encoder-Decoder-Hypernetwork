@@ -7,11 +7,13 @@ from torch.tensor import Tensor
 from typing import List, Optional, Tuple
 from typing_extensions import Final
 
+# TODO: remove intermediate_output
 # Cannot currently `jit` classes that inherit from Module directly. Have to `jit` an instance
 class Siren(torch.nn.Module):
     intermediate_output:Final[bool]
     linear_output:Final[bool]
     layer_parameters:List[Tuple[Parameter, Parameter]]
+    RFF_B:Optional[Tensor]
 
     def __init__(self, in_features:int, out_features:int, hidden_layers:Optional[List[int]], \
                 parameters:Optional[List[Tuple[Parameter, Parameter]]], intermediate_output:bool, linear_output:bool):
@@ -35,12 +37,12 @@ class Siren(torch.nn.Module):
                 if first:
                     self.layer_parameters.append((
                         Parameter(torch.empty((layer_size, previous_layer_size)).uniform_(-half_range * omega_0, half_range * omega_0), True),
-                        Parameter(torch.empty((layer_size)).uniform_(-half_range, half_range), True)
+                        Parameter(torch.empty((layer_size)).uniform_(-1., 1.), True)
                     ))
                 else:
                     self.layer_parameters.append((
-                        Parameter(torch.empty((layer_size, previous_layer_size)).uniform_(-half_range, half_range), True),
-                        Parameter(torch.empty((layer_size)).uniform_(-half_range, half_range), True)
+                        Parameter(torch.empty((layer_size, previous_layer_size)).uniform_(-half_range * omega_0, half_range * omega_0), True),
+                        Parameter(torch.empty((layer_size)).uniform_(-1., 1.), True)
                     ))
                 
                 previous_layer_size = layer_size
@@ -61,6 +63,7 @@ class Siren(torch.nn.Module):
     def forward(self, input:Tensor)->Tuple[Tensor, Optional[List[Tensor]]]:
         # TEST: Would not multipling by omega_0 during initialization help performance or multiplying by omega_0 for more layers?
         input:Tensor = input.clone().detach().requires_grad_(True)
+
         if self.intermediate_output:
             intermediate_output:List[Tensor] = []
             for weight, bias in self.layer_parameters[:-1]:
@@ -100,9 +103,8 @@ class Siren(torch.nn.Module):
             m_weight = u_weight.clone().detach().requires_grad_(True)
             m_bias = u_bias.clone().detach().requires_grad_(True)
 
+'''
 class Recurrent_Siren(torch.nn.Module):
-    intermediate_output:bool
-    linear_output:bool
     segment_parameters:List[List[Tuple[Parameter, Parameter]]]
     outgoing_segment_jumps:List[Tuple[int, List[int]]]
     incoming_segment_jumps:List[Tuple[int, List[int]]]
@@ -111,26 +113,30 @@ class Recurrent_Siren(torch.nn.Module):
 
     # TODO: Fix init and make the forward pass so that it actually properly represents an unrolled recurrent siren with skip and feedback connections
 
-    def __init__(self, in_parameters:int, out_parameters:int, segment_descriptions:Optional[List[List[int]]], parameters:Optional[List[List[Tuple[Parameter, Parameter]]]], \
-                incoming_segment_jumps:Optional[List[Tuple[int, List[int]]]], outgoing_segment_jumps:Optional[List[Tuple[int, List[int]]]], \
-                intermediate_output:bool, linear_output:bool):
+    # --- Technically, the in_parameters is already in the input and doesnt have to be sent seperately. It is in the segment_descriptions' first segments first value and
+    #       is the can be extracted from the first parameter(parameter[0].shape[1]???) in the tuple of the first layer of the first segment even though we dont need it in this case
+    #       REMOVE in_parameter explicitly from input as we can extract it when needed. Only need it during __init__
+    # in_parameters describes input layer. First segment must include the in_parameter as its first value(thus, first segment must have atleast one value)
+    # the last segment must have one layer for output
+
+    # TODO?(maybe) Modify segment_descriptions to allow specification of half range for each layer individually. Thus, it would have type: Optional[List[List[Tuple[int, float]]]]
+
+    def __init__(self, segment_descriptions:Optional[List[List[int]]], parameters:Optional[List[List[Tuple[Parameter, Parameter]]]], \
+                incoming_segment_jumps:Optional[List[Tuple[int, List[int]]]], outgoing_segment_jumps:Optional[List[Tuple[int, List[int]]]]):
         '''
+'''
         # TODO description
 
         Recurrent extension of Siren that allows both skip and feedback connections by describing the unrolled network. Recurrent connections are added together
 
         Parameters:
 
-        - in_parameters:
-
-        - out_parameter:
-
         - segment_descriptions:
 
         - parameters:
 
         - outgoing_segment_jumps: list of segments that the current segment indexed by its index in the outer list can forward its output to. 
-        If all segments only forward to one other segment, then this is a feedforward network. \n
+            If all segments only forward to one other segment, then this is a feedforward network. \n
          - Note: No segment can forward to the first segment and the last segment cannot forward to anything. The incoming segment to the
             first segment is the input and the last segment forwards to the output(Thus, the last element is required to be an empty list if there are any segments)
          - Note: All segments beside the first and last segment must have both atleast one segment that forwards into it and atleast one segment that it forwards to
@@ -138,22 +144,63 @@ class Recurrent_Siren(torch.nn.Module):
          - Note: Forward targets must be unique for a segment and in ascending order
 
         - incoming_segment_jumps
-
-        - intermediate_output:
-
-        - linear_output:
         '''
+'''
+
         super().__init__()
 
-        # xor check to ensure that only one of these is None
+        # CHECK 1:
+        # xor check to ensure that only one of these is None in both cases
         if (segment_descriptions is None) == (parameters is None):
             raise ValueError("(`segement_description` is None) xor (`parameters` is None) must return False")
-
-        # xor check for None
         if (incoming_segment_jumps is None) == (outgoing_segment_jumps is None):
             raise ValueError("(incoming_segment_jumps is None) xor (outgoing_segment_jumps) must return False")
 
+        # CHECK 2:
+        # check if any segment is empty in either
+        # check if any segment is unused by any segment_jumps
+        # check if there is atleast one segment in both cases
+        if parameters is None:
+            if len(segment_descriptions) < 1:
+                raise ValueError("Atleast one segments required in segment descriptions. Got 0 segments".format(len(segment_descriptions)))
+            segments_used:List[bool] = []
+            for index, segment in enumerate(segment_descriptions):
+                if len(segment) == 0:
+                    raise ValueError("Segment description at index {} is empty".format(index))
+                segments_used.append(False)
+            segment_jumps:List[Tuple[int, List[int]]] = []
+            if incoming_segment_jumps is None:
+                segment_jumps = outgoing_segment_jumps
+            else:
+                segment_jumps = incoming_segment_jumps
+            for current_segment_index, _ in segment_jumps:
+                segments_used[current_segment_index] = True
+            for index, used in enumerate(segments_used):
+                if not used:
+                    raise ValueError("Segment at index {} not used by either segment jumps".format(index))
+        else:
+            if len(parameters) < 1:
+                raise ValueError("Atleast one segment required in parameters. Got 0 segments")
+            segments_used:List[bool] = []
+            for index, segment in enumerate(parameters):
+                if len(segment) == 0:
+                    raise ValueError("Parameter segment at index {} is empty".format(index))
+                segments_used.append(False)
+            segment_jumps:List[Tuple[int, List[int]]] = []
+            if incoming_segment_jumps is None:
+                segment_jumps = outgoing_segment_jumps
+            else:
+                segment_jumps = incoming_segment_jumps
+            for current_segment_index, _ in segment_jumps:
+                segments_used[current_segment_index] = True
+            for index, used in enumerate(segments_used):
+                if not used:
+                    raise ValueError("Segment at index {} not used by either segment jumps".format(index))
+
         # TODO Rewrite this description
+        # CHECK 3:
+        # check for any segment index that does not exists due to being outside of [0, len(segment_descriptions)-1] or [0, len(parameters)-1]
+        # check for any segment_jump index that goes outside of [0, len(segment_jumps)-1]
         # check for any forwards to the initial segment
         # check if the last segment has any outbound jumps
         # check if that outbound jumps are unique for a segment and in ascending order
@@ -177,6 +224,12 @@ class Recurrent_Siren(torch.nn.Module):
                         raise ValueError("Last outgoing segment jump's destinations is not an empty list")
                 elif destinations == []:
                     raise ValueError("Outgoing segment jump index {} has an empty destinations list without being last outgoing segment jump index".format(current_jump_index))
+                if current_segment_index < 0:
+                    raise ValueError("Outgoing segment index {} < 0 in outgoing segment jump index {}".format(current_segment_index, current_jump_index))
+                if current_segment_index > num_segments-1:
+                    if parameters is None:
+                        raise ValueError("Outgoing segment index {} > len(segment_descriptions)-1 in outgoing segment jump index {}".format(current_segment_index, current_jump_index))
+                    raise ValueError("Outgoing segment index {} > len(paramters)-1 in outgoing segment jump index".format(current_segment_index, current_jump_index))
                 incoming_segment_jumps.append((current_segment_index, []))
 
             for current_jump_index, (_, destinations) in enumerate(outgoing_segment_jumps[:-1]):
@@ -236,6 +289,12 @@ class Recurrent_Siren(torch.nn.Module):
                         raise ValueError("First incoming segment jump's sources is not an empty list")
                 elif sources == []:
                     raise ValueError("Incoming segment jump index {} has an empty sources list without being first incoming segment jump index".format(current_jump_index))
+                if current_segment_index < 0:
+                    raise ValueError("Incoming segment index {} < 0 in Incoming segment jump index {}".format(current_segment_index, current_jump_index))
+                if current_segment_index > num_segments-1:
+                    if parameters is None:
+                        raise ValueError("Incoming segment index {} > len(segment_descriptions)-1 in Incoming segment jump index {}".format(current_segment_index, current_jump_index))
+                    raise ValueError("Incoming segment index {} > len(paramters)-1 in Incoming segment jump index".format(current_segment_index, current_jump_index))
                 outgoing_segment_jumps.append((current_segment_index, []))
 
             for current_jump_index, (_, sources) in enumerate(incoming_segment_jumps[1:]):
@@ -278,50 +337,104 @@ class Recurrent_Siren(torch.nn.Module):
                             "Size of segment output corresponding to destination jump index {} is {}\n"
                             "Size of segment output corresponding to destination jump index {} is {}"
                         ).format(current_jump_index, destination, destinations[0], destination_size, other_destination, other_destination_size))
-
         
         omega_0:Final[float] = 30.
-        self.intermediate_output = intermediate_output
-        self.linear_output = linear_output
         self.segment_parameters = []
         self.outgoing_segment_jumps = outgoing_segment_jumps
         self.incoming_segment_jumps = incoming_segment_jumps
 
         if parameters is None:
-            previous_layer_size = in_parameters
-            for segment_index, segment in enumerate(segment_descriptions[:-1]):
+            segment_is_first:List[bool] = []
+            for _ in segment_descriptions:
                 self.segment_parameters.append([])
-                if segment_index != 0:
-                    previous_layer_size = segment_descriptions[self.incoming_segment_jumps[segment_index][0]][-1]
-                for layer_index, layer_size in enumerate(segment):
-                    half_range:float = 1./previous_layer_size
-                    if (segment_index == 0) and (layer_index == 0):
-                        self.segment_parameters[-1].append((
-                            Parameter(torch.empty((layer_size, previous_layer_size)).uniform_(-half_range * omega_0, half_range * omega_0), True),
-                            Parameter(torch.empty((layer_size)).uniform_(-half_range, half_range), True)
-                        ))
+                segment_is_first.append(False)
+            for current_jump_index, (current_segment_index, destinations) in enumerate(self.outgoing_segment_jumps):
+                if current_jump_index == 0:
+                    if len(segment_descriptions[current_segment_index]) == 1:
+                        for destination in destinations:
+                            segment_is_first[self.outgoing_segment_jumps[destination][0]] = True
                     else:
-                        self.segment_parameters[-1].append((
-                            Parameter(torch.empty((layer_size, previous_layer_size)).uniform_(-half_range, half_range), True),
-                            Parameter(torch.empty((layer_size)).uniform_(-half_range, half_range), True)
-                        ))
-                    
-                    previous_layer_size = layer_size
+                        previous_layer_size:int = segment_descriptions[current_segment_index][0]
+                        segment_is_first[0] = True
+                        for layer_size in segment_descriptions[current_segment_index][1:]:
+                            half_range:float = 1./previous_layer_size
+                            if segment_is_first[0]:
+                                self.segment_parameters[current_segment_index].append((
+                                    Parameter(torch.empty((layer_size, previous_layer_size)).uniform_(-half_range * omega_0, half_range * omega_0), True),
+                                    Parameter(torch.empty((layer_size)).uniform_(-half_range, half_range), True)
+                                ))
+                            else:
+                                self.segment_parameters[current_segment_index].append((
+                                    Parameter(torch.empty((layer_size, previous_layer_size)).uniform_(-half_range, half_range), True),
+                                    Parameter(torch.empty((layer_size)).uniform_(-half_range, half_range), True)
+                                ))
+                            segment_is_first[0] = False
+                            previous_layer_size = layer_size
+                else:
+                    if len(self.segment_parameters[current_segment_index]) != 0:
+                        previous_layer_size:int = segment_descriptions[self.incoming_segment_jumps[self.incoming_segment_jumps[current_jump_index][1][0]][0]][-1]
+                        for layer_size in segment_descriptions[current_segment_index]:
+                            half_range:float = 1./previous_layer_size
+                            if segment_is_first[current_segment_index]:
+                                self.segment_parameters[current_segment_index].append((
+                                    Parameter(torch.empty((layer_size, previous_layer_size)).uniform_(-half_range * omega_0, half_range * omega_0), True),
+                                    Parameter(torch.empty((layer_size)).uniform_(-half_range, half_range), True)
+                                ))
+                            else:
+                                self.segment_parameters[current_segment_index].append((
+                                    Parameter(torch.empty((layer_size, previous_layer_size)).uniform_(-half_range, half_range), True),
+                                    Parameter(torch.empty((layer_size)).uniform_(-half_range, half_range), True)
+                                ))
+                            segment_is_first[current_segment_index] = False
+                            previous_layer_size = layer_size
         else:
             for segment in parameters:
                 self.segment_parameters.append([])
                 for parameter_tuple in segment:
                     self.segment_parameters[-1].append((
                         parameter_tuple[0].requires_grad_(True),
-                        parameter_tuple[1].requires_grad_(True)
+                        parameter_tuple[1].requires_grad(True)
                     ))
 
         # Due to parameters being stored in List[List[Tuple[Parameter, Parameter]]], we have to manually add them to _parameter because pytorch cannot find them
         for segment_index, segment in enumerate(self.segment_parameters):
+            if len(segment) == 0:
+                continue
             for layer_index, parameter_tuple in enumerate(segment):
                 self.register_parameter('weight-{}-{}'.format(segment_index, layer_index), parameter_tuple[0])
                 self.register_parameter('bias-{}-{}'.format(segment_index, layer_index), parameter_tuple[1])
 
-    def forward(self, input:Tensor)->Tuple[Tensor, Optional[List[Tensor]]]:
+    def forward(self, input:Tensor)->Tensor:
         input:Tensor = input.clone().detach().requires_grad_(True)
-        # TODO complete
+        # add seperate list for num incoming and num outgoing from segment jump
+        num_visited_segment_jumps:List[int] = []
+        segment_jumps_output:List[Optional[Tensor]] = []
+        for _ in self.outgoing_segment_jumps:
+            num_visited_segment_jumps.append(0)
+            segment_jumps_output.append(None)
+        current_jump_index:int = 0
+        stack_jump_index:List[int] = [] # This is emtpy because we append to it at forward and pop to return. This needs to work alongside num incoming and num outgoing. Maybe make tuple?
+        while True:
+            current_segment_index:int = self.outgoing_segment_jumps[current_jump_index][0]
+
+            # do segment operations on input if number of visited is met
+            if num_visited_segment_jumps[current_segment_index] == len(self.incoming_segment_jumps[current_jump_index][1]):
+                # get input from previous stack jump index's output
+                # first segment(index 0) has no previous segment beyond input, exemption for that specifically?
+                if current_jump_index == 0:
+                    previous_layer_size:int = self.segment_parameters[current_segment_index][0]
+                    for layers in self.segment_parameters[current_segment_index][1:]:
+                        
+                else:
+                    _visited_jump_index:int = self.incoming_segment_jumps[current_jump_index][1][0]
+                    _segment = self.incoming_segment_jumps[_visited_jump_index][0]
+                    if _segment == 0:
+                        
+                    previous_layer_size:int = self.segment_parameters[_segment][-1][1].shape[0]
+                    for layers in self.segment_parameters[current_segment_index]:
+                    
+
+            # otherwise return to caller
+
+            # if destinations is empty and have been visited required number of times, then return as this is the last visit of the last segment jump
+'''
